@@ -1,0 +1,304 @@
+function features = extractFeatures(recordName)
+load('Springer_B_matrix.mat');
+load('Springer_pi_vector.mat');
+load('Springer_total_obs_distribution.mat');
+
+
+featThresh = [28.0, 26.0, 24.0, 17.0];
+noOfFeatures = 4;
+
+
+%% Load data and resample data
+springer_options   = default_Springer_HSMM_options;
+[PCG, Fs1, nbits1] = wavread([recordName '.wav']);  % load data
+PCG =  PCG(1:min(65000,length(PCG)),:);
+PCG_resampled      = resample(PCG,springer_options.audio_Fs,Fs1); % resample to springer_options.audio_Fs (1000 Hz)
+
+%% Running runSpringerSegmentationAlgorithm.m to obtain the assigned_states
+[assigned_states] = runSpringerSegmentationAlgorithm(PCG_resampled, springer_options.audio_Fs, Springer_B_matrix, Springer_pi_vector, Springer_total_obs_distribution, false); % obtain the locations for S1, systole, s2 and diastole
+
+PCG_resampled = (PCG_resampled - mean(PCG_resampled))/std(PCG_resampled);
+
+PCG = PCG_resampled;
+numFeat = noOfFeatures;
+indx = find(abs(diff(assigned_states))>0); % find the locations with changed states
+
+if assigned_states(1)>0   % for some recordings, there are state zeros at the beginning of assigned_states
+    switch assigned_states(1)
+        case 4
+            K=1;
+        case 3
+            K=2;
+        case 2
+            K=3;
+        case 1
+            K=4;
+    end
+else
+    switch assigned_states(indx(1)+1)
+        case 4
+            K=1;
+        case 3
+            K=2;
+        case 2
+            K=3;
+        case 1
+            K=0;
+    end
+    K=K+1;
+end
+
+indx2                = indx(K:end);
+rem                  = mod(length(indx2),4);
+indx2(end-rem+1:end) = [];
+A                    = reshape(indx2,4,length(indx2)/4)'; % A is N*4 matrix, the 4 columns save the beginnings of S1, systole, S2 and diastole in the same heart cycle respectively
+
+[m,~] = size(A);
+FeatMat = zeros(m,numFeat);
+
+%% Feature calculation
+m_RR        = round(mean(diff(A(:,1))));             % mean value of RR intervals
+sd_RR       = round(std(diff(A(:,1))));              % standard deviation (SD) value of RR intervals
+mean_IntS1  = round(mean(A(:,2)-A(:,1)));            % mean value of S1 intervals
+sd_IntS1    = round(std(A(:,2)-A(:,1)));             % SD value of S1 intervals
+mean_IntS2  = round(mean(A(:,4)-A(:,3)));            % mean value of S2 intervals
+sd_IntS2    = round(std(A(:,4)-A(:,3)));             % SD value of S2 intervals
+mean_IntSys = round(mean(A(:,3)-A(:,2)));            % mean value of systole intervals
+sd_IntSys   = round(std(A(:,3)-A(:,2)));             % SD value of systole intervals
+mean_IntDia = round(mean(A(2:end,1)-A(1:end-1,4)));  % mean value of diastole intervals
+sd_IntDia   = round(std(A(2:end,1)-A(1:end-1,4)));   % SD value of diastole intervals
+
+for i=1:size(A,1)-1
+    R_SysRR(i)  = (A(i,3)-A(i,2))/(A(i+1,1)-A(i,1))*100;
+    R_DiaRR(i)  = (A(i+1,1)-A(i,4))/(A(i+1,1)-A(i,1))*100;
+    R_SysDia(i) = R_SysRR(i)/R_DiaRR(i)*100;
+    
+    P_S1(i)     = sum(abs(PCG(A(i,1):A(i,2))))/(A(i,2)-A(i,1));
+    P_Sys(i)    = sum(abs(PCG(A(i,2):A(i,3))))/(A(i,3)-A(i,2));
+    P_S2(i)     = sum(abs(PCG(A(i,3):A(i,4))))/(A(i,4)-A(i,3));
+    P_Dia(i)    = sum(abs(PCG(A(i,4):A(i+1,1))))/(A(i+1,1)-A(i,4));
+    if P_S1(i)>0
+        P_SysS1(i) = P_Sys(i)/P_S1(i)*100;
+    else
+        P_SysS1(i) = 0;
+    end
+    if P_S2(i)>0
+        P_DiaS2(i) = P_Dia(i)/P_S2(i)*100;
+    else
+        P_DiaS2(i) = 0;
+    end
+end
+if(~exist('R_SysRR','var'))
+	R_SysRR = 0;
+end
+if(~exist('R_DiaRR','var'))
+	R_DiaRR = 0;
+end
+if(~exist('R_SysDia','var'))
+	R_SysDia = 0;
+end
+if(~exist('P_SysS1','var'))
+	P_SysS1 = 0;
+end
+if(~exist('P_DiaS2','var'))
+	P_DiaS2 = 0;
+end
+
+m_Ratio_SysRR   = mean(R_SysRR);  % mean value of the interval ratios between systole and RR in each heart beat
+sd_Ratio_SysRR  = std(R_SysRR);   % SD value of the interval ratios between systole and RR in each heart beat
+m_Ratio_DiaRR   = mean(R_DiaRR);  % mean value of the interval ratios between diastole and RR in each heart beat
+sd_Ratio_DiaRR  = std(R_DiaRR);   % SD value of the interval ratios between diastole and RR in each heart beat
+m_Ratio_SysDia  = mean(R_SysDia); % mean value of the interval ratios between systole and diastole in each heart beat
+sd_Ratio_SysDia = std(R_SysDia);  % SD value of the interval ratios between systole and diastole in each heart beat
+
+indx_sys = find(P_SysS1>0 & P_SysS1<100);   % avoid the flat line signal
+if length(indx_sys)>1
+    m_Amp_SysS1  = mean(P_SysS1(indx_sys)); % mean value of the mean absolute amplitude ratios between systole period and S1 period in each heart beat
+    sd_Amp_SysS1 = std(P_SysS1(indx_sys));  % SD value of the mean absolute amplitude ratios between systole period and S1 period in each heart beat
+else
+    m_Amp_SysS1  = 0;
+    sd_Amp_SysS1 = 0;
+end
+indx_dia = find(P_DiaS2>0 & P_DiaS2<100);
+if length(indx_dia)>1
+    m_Amp_DiaS2  = mean(P_DiaS2(indx_dia)); % mean value of the mean absolute amplitude ratios between diastole period and S2 period in each heart beat
+    sd_Amp_DiaS2 = std(P_DiaS2(indx_dia));  % SD value of the mean absolute amplitude ratios between diastole period and S2 period in each heart beat
+else
+    m_Amp_DiaS2  = 0;
+    sd_Amp_DiaS2 = 0;
+end
+
+features = [m_RR sd_RR  mean_IntS1 sd_IntS1  mean_IntS2 sd_IntS2  mean_IntSys sd_IntSys  mean_IntDia sd_IntDia m_Ratio_SysRR sd_Ratio_SysRR m_Ratio_DiaRR sd_Ratio_DiaRR m_Ratio_SysDia sd_Ratio_SysDia m_Amp_SysS1 sd_Amp_SysS1 m_Amp_DiaS2 sd_Amp_DiaS2];
+
+
+
+%%%%%%%%%%%%%%%%%%%%%%%Extract Frequcy domain Features%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+wave = findDetails(PCG_resampled);
+
+type1 = [];
+type2 = [];
+type3 = [];
+type4 = [];
+
+for u=1:length(PCG_resampled)
+
+    te = mod(u,4)+1;
+	te = assigned_states(u);
+    if (te==1)
+        type1 = [type1 PCG_resampled(u)];
+        
+
+    elseif (te==2)
+        type2 = [type2 PCG_resampled(u)];
+
+    elseif (te==3)
+       
+        type3 = [type3 PCG_resampled(u)];
+
+    elseif (te == 4)
+        
+        type4 = [type4 PCG_resampled(u)];
+    
+    end
+ 
+end
+
+
+temp_mom2 = [moment(type1,2), moment(type2,2), moment(type3,2), moment(type4,2)];
+%temp_mom2 = temp_mom2/norm(temp_mom2);
+
+temp_mom3 = [moment(type1,3), moment(type2,3), moment(type3,3), moment(type4,3)];
+%temp_mom3 = temp_mom3/norm(temp_mom3);
+
+temp_mom = [temp_mom2 temp_mom3];
+
+sach_temp = [sum(type1.^2)/length(type1) sum(type2.^2)/length(type2) sum(type3.^2)/length(type3) sum(type4.^2)/length(type4)];
+
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+	%spectral entropy	
+	len = length(PCG_resampled);
+	psd = fft(PCG_resampled, len);
+	spectral_entropy = abs(sum((psd.*log2(psd))));
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%Note::This might need a change, use 1000 instead of Fs1%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+	%different bands
+ 	filter1 = butter(2, [25 250]/(Fs1/2));
+ 	filter2 = butter(4, 25/1000, 'high');
+ 	filter3 = butter(2, [50 500]/(Fs1/2));
+ 	filter4 = butter(2, [125 750]/(Fs1/2));
+ 	filter5 = butter(4, 250/1000, 'high');
+ 
+ 	%op1 = conv(PCG_resampled, filter1);
+ 	op2 = conv(PCG_resampled, filter2);
+ 	op3 = conv(PCG_resampled, filter3);
+ 	%op4 = conv(PCG_resampled, filter4);
+	op5 = conv(PCG_resampled, filter5);
+
+	
+	dlmwrite('full.txt', PCG_resampled, 'delimiter', '\n');
+		
+	[status,command1] = system('sampen/./sampen -v full.txt');
+
+	[status, command2] = system('memse/./memse.o -w Blackman -s -n 10  -Z full.txt');
+
+	%sample entropy and simple entropy
+	command1 = str2num(command1);
+	command2 = str2num(command2);
+
+	%moment_feat_1 = [mean((op2),1) mean((op3),1) mean((op5),1)];
+	%moment_normal_1 = moment_feat_1/norm(moment_feat_1);
+
+	moment_feat_2 = [moment((op2),2)  moment((op3),2) moment((op5),2)];
+	%moment_normal_2 = moment_feat_2/norm(moment_feat_2);
+
+	moment_feat_3 = [moment((op2),3)  moment((op3),3) moment((op5),3)];
+	%moment_normal_3 = moment_feat_3/norm(moment_feat_3);
+
+
+	%temp_mom1 = [moment(type1,1), moment(type2,1), moment(type3,1), moment(type4,1)];
+	%temp_mom1 = temp_mom1/norm(temp_mom1);
+
+
+	%wavelets' features
+	wave_mom2 = [moment(wave(1,:),2), moment(wave(2,:),2), moment(wave(3,:),2), moment(wave(4,:),2)];
+	%temp_mom2 = temp_mom2/norm(temp_mom2);
+
+	wave_mom3 = [moment(wave(1,:),3), moment(wave(2,:),3), moment(wave(3,:),3), moment(wave(4,:),3)];
+	%temp_mom3 = temp_mom3/norm(temp_mom3);
+
+	wave_mom = [wave_mom2 wave_mom3];
+
+	wave_energy = (power(wave,2));
+	wave_energy = [sum(wave_energy(1,:))/length(wave_energy(1,:)), sum(wave_energy(2,:))/length(wave_energy(2,:)), sum(wave_energy(3,:))/length(wave_energy(3,:)), sum(wave_energy(4,:))/length(wave_energy(4,:))];
+
+	mom = [moment_feat_2 moment_feat_3 ];
+
+	opt = arOptions('Approach', 'ls', 'EstCovar', false);
+
+
+	[m, h] = ar(PCG_resampled,5, opt);
+
+
+	[feature_ar sd]= getpvec(m);
+
+
+
+	%comlplexity and mobility
+	[complexity mobility] = hjort(PCG_resampled);
+
+	%simplicity feature using PCA
+	[a4 b4 c4 d4]= princomp(PCG_resampled);
+	simplicity = 1/(-(sum(c4.*log2(c4'))));
+
+	
+
+	dilbert = [
+	hilbert(PCG_resampled)];
+
+
+	%sach_temp = [sum(type1.^2)/length(type1) sum(type2.^2)/length(type2) sum(type3.^2)/length(type3) sum(type4.^2)/length(type4)];
+
+	%sach_temp = sach_temp/norm(sach_temp);
+	wave_angle = mean((180.*angle(dilbert))./pi);
+	%wave_angle_2 = mode((180.*angle(dilbert))./pi);
+	amplitude  = (abs(dilbert));
+	%amplitude = amplitude/norm(amplitude);
+	hb = mean(mean(amplitude'));
+
+
+
+	covariance = getcov(m);
+	covariance =    reshape(covariance,1, 5*5);
+	%gh = reshape(m.Covariance,1,25);
+
+
+	freqFeatures = [spectral_entropy, hb, wave_angle, wave_energy, temp_mom, wave_mom, sach_temp, mom, mean(sd), complexity, mobility, covariance, simplicity, command1', command2'];
+
+
+
+%%%%%%%%%%%%%%%%%%%%%%extract Markov features%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+ind = find(R_SysRR >= featThresh(1));
+featMat(ind,1) = 1;
+ind = find(R_DiaRR >= featThresh(2));
+featMat(ind,2) = 1;
+
+ind = find(P_SysS1 >= featThresh(3));
+featMat(ind,3) = 1;
+ind = find(P_DiaS2 >= featThresh(4));
+featMat(ind,4) = 1;
+
+encodedFeat = getEncodedFeat(featMat);
+
+noOfStates = power(2,noOfFeatures);
+markovFeatures = getMarkovTransProb(encodedFeat,noOfStates);
+
+
+
+
+features = [features freqFeatures, markovFeatures];
+features(isnan(features))=0;
+end
